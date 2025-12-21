@@ -1,6 +1,6 @@
-# Spectral Prefetcher: A Graph Neural Network-Based Storage Prefetcher
+# [2025 PyTorch Conference Poster] Spectral Prefetcher: A Graph Neural Network-Based Storage Prefetcher
 
-This repository contains the implementation of **Spectral Prefetcher**, a spectral graph neural network designed for rapid and precise I/O access pattern prediction in cloud storage systems. [Link to paper](./assets/GNN%20paper%20Zeyuan%20Yang%20and%20Daniar%20Kurniawan.pdf)
+This repository contains the implementation of **Spectral Prefetcher**, a spectral graph neural network designed for rapid and precise I/O access pattern prediction in cloud storage systems. [Link to paper](./assets/GNN%20paper%20Zeyuan%20Yang%20and%20Daniar%20Kurniawan.pdf). 
 
 <img width="1197" height="796" alt="Screenshot 2025-12-21 at 11 06 28 AM" src="https://github.com/user-attachments/assets/e191adcd-d440-4ba2-8fe7-c0c325e6090f" />
 
