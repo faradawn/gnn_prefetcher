@@ -41,11 +41,15 @@ opt = Options()
 TRAINED_MODEL = None
 GRAPH_DICTS = None
 
+# Assumed storage latencies (seconds) for access-speed metric
+SSD_MISS_LATENCY_S = 0.0001   # 0.1 ms
+HDD_MISS_LATENCY_S = 0.020    # 20  ms
+BLOCK_SIZE_KB      = 4        # assumed block size for effectiveness/overhead
+
+
 def dict_generate(train_trace, top_num=1000):
     train_trace['KB_Offset_Delta'] = train_trace['KB_Offset'] - \
         train_trace['KB_Offset'].shift(-1)
-    # print(train_trace.head(5))
-    # exit(0)
     train_trace['KB_Offset_Delta'] = train_trace['KB_Offset_Delta'].fillna(0)
 
     a = train_trace['KB_Offset_Delta'].astype(int).unique().tolist()
@@ -95,12 +99,11 @@ def trace2input(dicts, trace, window_size=32):
 
         input_single = []
         for j in range(i, i+window_size+1):
-            # calculating the real delta
             diff = int(trace[j]-trace[j+1])
             if operation_id_map[diff] in keys:
-                input_single.append(bo_map[operation_id_map[diff]]+1)###
+                input_single.append(bo_map[operation_id_map[diff]]+1)
             else:
-                input_single.append(bo_map[999999]+1)###
+                input_single.append(bo_map[999999]+1)
         inputs.append(input_single[:-1])
         targets.append(input_single[-1])
     return inputs, targets
@@ -108,194 +111,170 @@ def trace2input(dicts, trace, window_size=32):
 def build_feature_from_test_data(test_data):
     n_tests = len(test_data.inputs)
     test_data_list = []
-    # Version 2. Batch size is 1
     for idx in range(n_tests):
-        # Q: What is A? The dimension of A is changing for each batch (128, 21, 42), (128, 15, 30)
-        # input_feature, A, items = test_data.get_one_slice([idx])
-
         delta_classes = test_data.inputs[[idx]][0]
         input_feature, A, items = build_adjacency_matrix_and_alias(delta_classes)
-
-        # exit(0)
-        # tmp = np.array(A)
-        # print(" A ", len(A), tmp.shape)
         test_data_list.append((input_feature, A, items, None, None))
-        # if idx > 10:
-        #     exit(0)
     return test_data_list
 
 def dataset2input(dataset, window_size=32, method='top', top_num=1000):
     if method == 'top':
         names = ['TimeStamp', 'KB_Offset']
-        # For flashnet trace
-        # ts_record, dev_num, offset, size, io_type 
-        # 0          1        2       3     4
-        flashnet_prefix = '/home/cc/flashnet/model_collection/5_block_prefetching/dataset/iotrace/'
-        flashnet_suffix = '/read_io.trace'
         lba_trace = dataset
-        df = pd.read_csv(lba_trace, engine='python', skiprows=1, header=None, na_values=['-1'], usecols=[0, 2], names=names)
-        df['KB_Offset'] = df['KB_Offset'] // 1024 # Originally it was in bytes, now it is in KB
+        df = pd.read_csv(lba_trace, engine='python', skiprows=0, header=None, na_values=['-1'], usecols=[0, 4], names=names)
+        df['KB_Offset'] = df['KB_Offset'] // 1024
 
-        # For Seagate trace
-        # time, dev, offset, size, readwrite
-        # 131054 0 17408 32768 1
-        # lba_trace = flashnet_prefix + dataset
-        # df = pd.read_csv(lba_trace, engine='python', skiprows=1, header=None, na_values=['-1'], usecols=[0, 2], names=names, sep=' ')
-        
         print('\nReading trace: ', lba_trace, '\n')
         print("Length of trace", len(df))
-        # print(df.head(3))
-
-        # df = df.sort_values(by=['TimeStamp'])
-        # df.reset_index(inplace=True, drop=True)
 
         train_trace = df[:int(len(df)*-opt.valid_portion)]['KB_Offset'].tolist()
         test_trace = df[int(len(df)*-opt.valid_portion)+1:]['KB_Offset'].tolist()
         print(" train_trace ", len(train_trace), train_trace[0], train_trace[1])
         n_tests = len(test_trace) - window_size - 1
-        dicts = dict_generate(df, top_num=top_num) # maps delta -> class
-        # exit(0)
+        dicts = dict_generate(df, top_num=top_num)
 
-        train_data = tuple(trace2input(dicts, train_trace, window_size=window_size)) # 
-        # print(" len test_trace", len(test_trace))
-
+        train_data = tuple(trace2input(dicts, train_trace, window_size=window_size))
         test_data = tuple(trace2input(dicts, test_trace, window_size=window_size))
 
         train_data = Data(train_data, shuffle=True)
         test_data = Data(test_data, shuffle=False)
 
-        # For train
         train_slices = train_data.generate_batch(opt.batchSize)
         train_data_list = []
         for i in train_slices:
             alias_inputs, A, items, mask, targets = train_data.get_slice(i)
             train_data_list.append((alias_inputs, A, items, mask, targets))
 
-        # For test
-        test_data_list = []
-
-        # Version 1. All the tests are contained in a single batch
-        # all_indexes = [i for i in range(n_tests)]
-        # alias_inputs, A, items, mask, targets = test_data.get_slice(all_indexes)
-        # test_data_list.append((alias_inputs, A, items, mask, targets))
-        # tmp = np.array(A)
-        # print(" A ", len(A), tmp.shape)
-        # exit(0)
-
-        # Version 2. Batch size is 1
-        if False:
-            for idx in range(n_tests):
-                # Q: What is A? The dimension of A is changing for each batch (128, 21, 42), (128, 15, 30)
-                # alias_inputs, A, items = test_data.get_one_slice([idx])
-
-                delta_classes = test_data.inputs[[idx]][0]
-                alias_inputs, A, items = build_adjacency_matrix_and_alias(delta_classes)
-
-                # exit(0)
-                tmp = np.array(A)
-                # print(" A ", len(A), tmp.shape)
-                test_data_list.append((alias_inputs, A, items, None, None))
-                # if idx > 10:
-                #     exit(0)
-
-        # Version 3. Original code (Prepare the test in 128 batch size)
-        # test_silces = test_data.generate_batch(opt.batchSize)
-        # print("test_silces len", len(test_silces))
-        # for i in test_silces:
-        #     print(" i ", len(i))
-        #     # Q: What is A? The dimension of A is changing for each batch (128, 21, 42), (128, 15, 30)
-        #     alias_inputs, A, items, mask, targets = test_data.get_slice(i)
-
-        #     tmp = np.array(A)
-        #     print(" A ", len(A), tmp.shape)
-        #     test_data_list.append((alias_inputs, A, items, mask, targets))
-
         n_node = top_num + 3
 
         return train_data_list, train_slices, test_data, dicts, n_node, train_trace, test_trace
 
 
-# Just calculating the hit rate and stats
-# arr_raw_pred -> contains 0-1000 predicted classes
-def single_cache_test(test_trace, arr_raw_pred, save_name, dicts):
+# ---------------------------------------------------------------------------
+# Metrics computation  (matches spectral main.py Section 5.3)
+# ---------------------------------------------------------------------------
+
+def single_cache_test(test_trace, arr_raw_pred, save_name, dicts,
+                      cache_size=1000,
+                      inference_time_s=None,
+                      n_inferences=None):
+    """
+    Runs cache simulation and computes all metrics matching spectral main.py.
+
+    CacheTest.get_stats() must return (total_ios, total_pres, total_hits, total_prehits).
+    """
     bo_map, bo_map_div, operation_id_map, operation_id_map_div = dicts
-    hit_rate = []
-    prehit_rate = []
-    stats = []
-    caches = {}
-    # maxsize = [5] + \
-        # [i*10 for i in range(1, 10)] + [i*100 for i in range(1, 11)]
-    
-    maxsize = [1000]
 
-    for i in range(len(maxsize)):
-        caches["LRU"+str(maxsize[i])] = CacheTest(maxsize[i])
-
+    cache = CacheTest(cache_size)
+    arr_lba_to_prefetch = []
 
     print("Total IO in the test set ", len(test_trace))
-    arr_lba_to_prefetch = []
-    # Q: Why it is not forming the delta based features from the test trace?
     for test_id, last_lba in enumerate(test_trace):
-        # Q: Why is this iterating the item in the cache?
-        for name, cache in caches.items():
-            cache.push_normal(last_lba)
-            # print(f"=== i {i}, requesting {test_trace[i]}")
-            # print("arr_raw_pred[i][0]", arr_raw_pred[i][0])
-            if arr_raw_pred[test_id] > 0:
-                # print( " predicted classes ", arr_raw_pred[test_id])
-                actual_delta = operation_id_map_div[bo_map_div[arr_raw_pred[test_id]-1]]
-                # print( " actual_delta ", actual_delta)
-                lba_to_prefetch = test_trace[test_id] - actual_delta
-                cache.push_prefetch(lba_to_prefetch)###
-                # print(test_trace[i], operation_id_map_div[bo_map_div[arr_raw_pred[i][0]-1]])
-                arr_lba_to_prefetch.append(lba_to_prefetch)
-                # print(lba_to_prefetch)
-            else:
-                # print("no prefetch")
-                arr_lba_to_prefetch.append(0)
-    
-    # Just printing the cache hit rate and stats
-    for name, cache in caches.items():
-        print(format(cache.get_hit_rate(), '.4f'), format(cache.get_prehit_rate(), '.4f'), '\t', name)
-        hit_rate.append(cache.get_hit_rate())
-        prehit_rate.append(cache.get_prehit_rate())
-        stats.append(cache.get_stats())
+        cache.push_normal(last_lba)
 
-    # np.savetxt('hit_results/'+save_name+'_hit_rate.txt', hit_rate, fmt='%.4f')
-    # np.savetxt('hit_results/'+save_name +'_pre_hit_rate.txt', prehit_rate, fmt='%.4f')
-    # np.savetxt('hit_results/'+save_name+'_stats.txt', stats, fmt='%d')
-    return arr_lba_to_prefetch
+        if arr_raw_pred[test_id] > 0:
+            actual_delta = operation_id_map_div[bo_map_div[arr_raw_pred[test_id] - 1]]
+            lba_to_prefetch = test_trace[test_id] - actual_delta
+            cache.push_prefetch(lba_to_prefetch)
+            arr_lba_to_prefetch.append(lba_to_prefetch)
+        else:
+            arr_lba_to_prefetch.append(0)
 
-# ERROR FUNCTION to FIX
+    total_ios, total_pres, total_hits, total_prehits = cache.get_stats()
+
+    hit_rate    = cache.get_hit_rate()
+    prehit_rate = cache.get_prehit_rate()
+
+    n_misses = total_ios - total_hits
+
+    ssd_duration     = n_misses * SSD_MISS_LATENCY_S
+    hdd_duration     = n_misses * HDD_MISS_LATENCY_S
+    access_speed_ssd = total_ios / ssd_duration if ssd_duration > 0 else float('inf')
+    access_speed_hdd = total_ios / hdd_duration if hdd_duration > 0 else float('inf')
+
+    # Prefetch effectiveness: fraction of issued prefetches that resulted in a hit
+    prefetch_effectiveness = (total_prehits / total_pres * 100) if total_pres > 0 else 0.0
+
+    # Prefetch overhead: unused prefetch blocks as a fraction of total user IOs
+    unused_prefetch   = total_pres - total_prehits
+    prefetch_overhead = (unused_prefetch / total_ios * 100) if total_ios > 0 else 0.0
+
+    metrics = {
+        'hit_rate':               hit_rate * 100,
+        'prehit_rate':            prehit_rate * 100,
+        'access_speed_ssd':       access_speed_ssd,
+        'access_speed_hdd':       access_speed_hdd,
+        'prefetch_effectiveness': prefetch_effectiveness,
+        'prefetch_overhead':      prefetch_overhead,
+        'total_ios':              total_ios,
+        'total_pres':             total_pres,
+        'total_hits':             total_hits,
+        'total_prehits':          total_prehits,
+        'n_misses':               n_misses,
+    }
+
+    if inference_time_s is not None and n_inferences is not None:
+        metrics['inference_latency_s']      = inference_time_s
+        metrics['per_inference_latency_ms'] = (inference_time_s / n_inferences * 1000) if n_inferences > 0 else 0
+        metrics['throughput_inf_per_s']     = n_inferences / inference_time_s if inference_time_s > 0 else 0
+
+    return metrics, arr_lba_to_prefetch
+
+
+def log_metrics(metrics, model, dataset_name):
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    print('\n' + '=' * 60)
+    print(f'  SGDP — EVALUATION RESULTS')
+    print(f'  Dataset : {dataset_name}')
+    print('=' * 60)
+    print(f"  Hit Rate                  : {metrics['hit_rate']:.2f}%")
+    print(f"  Prefetch Hit Rate         : {metrics['prehit_rate']:.2f}%")
+    print(f"  Access Speed (SSD)        : {metrics['access_speed_ssd']:.1f} req/s")
+    print(f"  Access Speed (HDD)        : {metrics['access_speed_hdd']:.1f} req/s")
+    print(f"  Prefetch Effectiveness    : {metrics['prefetch_effectiveness']:.2f}%")
+    print(f"  Prefetch Overhead         : {metrics['prefetch_overhead']:.2f}%")
+    print(f"  Total IOs                 : {metrics['total_ios']:,}")
+    print(f"  Total Prefetches Issued   : {metrics['total_pres']:,}")
+    print(f"  Cache Hits                : {metrics['total_hits']:,}")
+    print(f"  Prefetch Hits             : {metrics['total_prehits']:,}")
+    print(f"  Cache Misses              : {metrics['n_misses']:,}")
+    if 'inference_latency_s' in metrics:
+        print(f"  Inference Time (total)    : {metrics['inference_latency_s']:.2f}s")
+        print(f"  Inference Latency (per)   : {metrics['per_inference_latency_ms']:.3f}ms")
+        print(f"  Throughput                : {metrics['throughput_inf_per_s']:.1f} inf/s")
+    print(f"  Model Size (# params)     : {n_params:,}")
+    print('=' * 60 + '\n')
+
+
+# ---------------------------------------------------------------------------
+# ERROR FUNCTION to FIX (kept from original)
+# ---------------------------------------------------------------------------
+
 def score_compute(all_preds, all_targets, save_name):
-    # print(f"=== Len of all_preds {len(all_preds)}, all_target {len(all_targets)}")
-    # print("all pred shape", all_preds.shape)
-    # print("pred elements len", len(all_preds[0]), len(all_preds[1]), len(all_preds[-1]))
-
-    # print("all tar", all_targets)
-    
     pre_list = []
     mmr_list = []
     for i in range(1,len(all_preds[0])):
         pre_list.append(np.mean([np.where(t in p[:i],1,0) for t,p in zip(all_targets, all_preds)]))
-        # mmr_list.append(np.mean([1/(np.where(p[:i]==t)[0]+1) if t in p[:i] else 0 for t,p in zip(all_targets,all_preds)]))
         mmr_list.append(np.mean([1/(np.where(p[:i]==t)[0][0]+1) if t in p[:i] else 0 for t,p in zip(all_targets,all_preds)]))
 
     np.savetxt('hit_results/'+save_name+'_pre_list.txt', pre_list, fmt='%.4f')  
     np.savetxt('hit_results/'+save_name +'_mmr_list.txt', mmr_list, fmt='%.4f')
     return pre_list,mmr_list
 
-def train_model(dataset):
-    train_data_list, train_slices, test_data, dicts, n_node, train_trace, test_trace = dataset2input(dataset=dataset, window_size=opt.window, top_num=opt.topnum) # type: ignore
 
-    # Only the first 50% will be used for training (self.valid_portion = 0.5)
+# ---------------------------------------------------------------------------
+# Global-state helpers for online / streaming use
+# ---------------------------------------------------------------------------
+
+def train_model(dataset):
+    train_data_list, train_slices, test_data, dicts, n_node, train_trace, test_trace = dataset2input(dataset=dataset, window_size=opt.window, top_num=opt.topnum)
+
     model = trans_to_cuda(SessionGraph(opt, n_node))
     for epoch in range(opt.epoch):
         print('===== epoch:', epoch)
         print('start training: ')
         model = training(model,train_data_list,train_slices)
-        # arr_raw_pred = train_test_pred(model, train_data_list, train_slices, test_data_list, batching=False)
-    # Ready for Testing 
     model.scheduler.step()
     model.eval()
     return model, dicts
@@ -316,111 +295,95 @@ def convert_class_to_delta(predicted_class):
 
 def convert_hist_delta_to_classes(hitorical_deltas):
     global GRAPH_DICTS
-    assert len(hitorical_deltas) == 32 # window size must be 32
+    assert len(hitorical_deltas) == 32
     bo_map, _, operation_id_map, _ = GRAPH_DICTS
     keys = bo_map.keys()
     delta_classes = []
-    # print(" operation_id_map ", len(operation_id_map), operation_id_map)
     for delta in hitorical_deltas:
         if operation_id_map[delta] in keys:
-            delta_classes.append(bo_map[operation_id_map[delta]] + 1)###
+            delta_classes.append(bo_map[operation_id_map[delta]] + 1)
         else:
             delta_classes.append(bo_map[999999]+1)
     return delta_classes
 
 def predict_next_lba(last_lba, historical_deltas):
     global TRAINED_MODEL, GRAPH_DICTS
-    # convert historical delta to its corresponding class
     delta_classes = convert_hist_delta_to_classes(historical_deltas)
-
-    # Run inference
     predicted_class = run_single_inference(TRAINED_MODEL, delta_classes)
-
     actual_delta = convert_class_to_delta(predicted_class)
     if predicted_class > 0:
-        # print( " actual_delta ", actual_delta)
         lba_to_prefetch = last_lba - actual_delta
-        # print(lba_to_prefetch)
         return lba_to_prefetch
     else:
         return None
 
-# output test_trace, pred
+
+# ---------------------------------------------------------------------------
+# Main wrapper
+# ---------------------------------------------------------------------------
+
 def graph_wrapper(raw_trace):
-    # dataset_col = ['proj_0_1000.csv'] # MSR raw
-    # dataset_col = ['msr.cut.per_50k.rw_78_22.200'] # MSR flashnet cut
-    # dataset_col = ['seagate.16k.all_read.fio_90seq_10rand_256k_8q_reads_8_lun_10min_container192_filtered']
-    # dataset_col = ['tencent.cut.per_100k.most_size_thpt.109'] # msr.cut.per_50k.rw_78_22.200 # alibaba.cut.per_50k.rw_27_73.140
-    # dataset_col = ['alibaba.cut.per_50k.rw_27_73.140'] #alibaba.cut.per_10k.most_size_thpt_iops_rand.719
-    
     print("Inside graph main, raw_trace", raw_trace)
     dataset = raw_trace
- 
-    # deviceID = 0 # only one GPU
-    # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    # os.environ['CUDA_VISIBLE_DEVICES'] = str(deviceID)
-    # device = torch.device('cuda:'+str(deviceID))
-    # print("Is CUDA available:", torch.cuda.is_available())
 
-    train_data_list, train_slices, test_data, dicts, n_node, train_trace, test_trace = dataset2input(dataset=dataset, window_size=opt.window, top_num=opt.topnum) # type: ignore
-
-    # building the features from the raw test data 
-    # test_data_list = build_feature_from_test_data(test_data)
+    train_data_list, train_slices, test_data, dicts, n_node, train_trace, test_trace = dataset2input(dataset=dataset, window_size=opt.window, top_num=opt.topnum)
 
     model = trans_to_cuda(SessionGraph(opt, n_node))
     model_path = 'checkpoint/'+'model_' + str(dataset)+'_'+time.strftime("%Y_%m_%d_%H_%M_%S", time.localtime())
     folder = os.path.exists(model_path)
     if not folder:
         os.makedirs(model_path)
-    
+
     print("train_data_list len", len(train_data_list))
     print(train_data_list[0][0][1])
-
     print('\n=== Start training, model_path:', model_path)
 
-    # Training
+    # ---- Training ----
     for epoch in range(opt.epoch):
         print('===== epoch:', epoch)
         print('start training: ')
-        model = training(model,train_data_list,train_slices)
-        # arr_raw_pred = train_test_pred(model, train_data_list, train_slices, test_data_list, batching=False)
+        model = training(model, train_data_list, train_slices)
 
-    # Testing 
+    # ---- Inference ----
     model.scheduler.step()
     model.eval()
     print("\nDo per inference testing:")
-    # test_data is array of historical deltas
+
     arr_delta_classes = test_data.get_data_as_list()
-    # print("     len arr_delta_classes", len(arr_delta_classes), arr_delta_classes[0])
-    # exit(0)
     arr_raw_pred = []
-    arr_lba_to_prefetch = []
     bo_map, bo_map_div, operation_id_map, operation_id_map_div = dicts
-    test_trace=test_trace[opt.window:-1]
+    test_trace = test_trace[opt.window:-1]
     print("     len test_trace", len(test_trace))
+
+    start_eval_time = time.time()
 
     with torch.no_grad():
         for idx, delta_classes in enumerate(arr_delta_classes):
-            # Submit each inference to the model
             predicted_class = run_single_inference(model, delta_classes)
-            # print("hitorical_deltas", hitorical_deltas)
             arr_raw_pred.append(predicted_class)
 
-            if predicted_class > 0:
-                actual_delta = operation_id_map_div[bo_map_div[predicted_class - 1]]
-                # print( " actual_delta ", actual_delta)
-                lba_to_prefetch = test_trace[idx] - actual_delta
-                arr_lba_to_prefetch.append(lba_to_prefetch)
-                # print(lba_to_prefetch)
-            else:
-                arr_lba_to_prefetch.append(0)
-    # exit(0)
-    # save_name = dataset+'_0_epoch'
-    # arr_lba_to_prefetch = single_cache_test(test_trace, arr_raw_pred = arr_raw_pred, save_name=save_name, dicts=dicts)
-    
+    inference_time = time.time() - start_eval_time
+    n_inferences   = len(arr_delta_classes)
+
+    # ---- Cache simulation + metrics ----
+    metrics, arr_lba_to_prefetch = single_cache_test(
+        test_trace, arr_raw_pred,
+        save_name=dataset,
+        dicts=dicts,
+        cache_size=1000,
+        inference_time_s=inference_time,
+        n_inferences=n_inferences,
+    )
+    log_metrics(metrics, model, raw_trace)
+
+    # ---- Save checkpoint ----
     torch.save(model, os.path.join(model_path, str(0)+'.pt'))
     torch.cuda.empty_cache()
+
     return arr_lba_to_prefetch, len(test_trace)
 
-# 
 
+if __name__ == '__main__':
+    arr_lba_to_prefetch, n_tests = graph_wrapper('dataset/MSR-Cambridge/prxy_0.csv.gz')
+    print("Number of test IOs:", n_tests)
+    print("Sample prefetch addresses:", arr_lba_to_prefetch[:10])
