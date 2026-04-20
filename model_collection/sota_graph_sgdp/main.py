@@ -128,50 +128,6 @@ def trace2input(dicts, trace, window_size=32):
     return _encode_window(dicts, trace, window_size)
 
 
-# Time threshold for stream splitting (paper Section IV-A).
-# MSR-Cambridge timestamps are in 100-nanosecond Windows FILETIME units.
-#   0.01 ms = 10_000 units  (MSRC setting from paper)
-#   0.1  ms = 100_000 units (HW dataset setting from paper)
-STREAM_SPLIT_THRESHOLD = 10_000  # change to 100_000 for HW datasets
-
-
-def trace2input_streams(dicts, df_split, window_size=32):
-    """
-    Time-based stream splitting (paper Section IV-A).
-
-    Splits the trace at any gap > STREAM_SPLIT_THRESHOLD between consecutive
-    timestamps, then applies the sliding window *within* each stream.
-    Windows that would cross a stream boundary are discarded.
-
-    Returns (inputs, targets, lbas, window_end_positions) where:
-      lbas[j]               — raw LBA at the window endpoint for sample j
-      window_end_positions[j] — index of that LBA in the full df_split sequence
-                                (used to align prefetches with the full trace)
-    """
-    inputs, targets, lbas, window_end_positions = [], [], [], []
-
-    gaps       = df_split['TimeStamp'].diff().fillna(0)
-    stream_ids = (gaps > STREAM_SPLIT_THRESHOLD).cumsum()
-
-    # pos_offset tracks how many rows of df_split have been consumed so far,
-    # including short streams that produce no windows.  This lets us map
-    # within-stream window positions to absolute positions in df_split.
-    pos_offset = 0
-    for _sid, stream_df in df_split.groupby(stream_ids):
-        lba_list = stream_df['KB_Offset'].tolist()
-        if len(lba_list) > window_size + 1:
-            s_in, s_tgt, s_lba = _encode_window(dicts, lba_list, window_size)
-            inputs.extend(s_in)
-            targets.extend(s_tgt)
-            lbas.extend(s_lba)
-            # Window i ends at stream position (i + window_size), which maps
-            # to absolute position (pos_offset + i + window_size) in df_split.
-            for i in range(len(s_in)):
-                window_end_positions.append(pos_offset + i + window_size)
-        pos_offset += len(lba_list)
-
-    return inputs, targets, lbas, window_end_positions
-
 
 def dataset2input(dataset, window_size=32, method='top', top_num=1000):
     """
@@ -202,12 +158,12 @@ def dataset2input(dataset, window_size=32, method='top', top_num=1000):
     # Build vocabulary from the full trace (original paper protocol)
     dicts = dict_generate(df, top_num=top_num)
 
-    # Use time-based stream splitting (paper Section IV-A).
-    # Pass the DataFrame slices so stream boundaries are derived from timestamps.
-    train_df = df.iloc[:split_idx]
-    test_df  = df.iloc[split_idx + 1:]
-    train_inputs, train_targets, _train_lbas, _          = trace2input_streams(dicts, train_df, window_size=window_size)
-    test_inputs,  test_targets,  test_lbas,  test_wpos   = trace2input_streams(dicts, test_df,  window_size=window_size)
+    # Flat sliding window over the full train/test traces (no stream splitting).
+    # Window i ends at position (i + window_size) in each sub-trace, so
+    # test_wpos is a simple contiguous range — no timestamp logic needed.
+    train_inputs, train_targets, _train_lbas = trace2input(dicts, train_trace, window_size=window_size)
+    test_inputs,  test_targets,  test_lbas   = trace2input(dicts, test_trace,  window_size=window_size)
+    test_wpos = list(range(window_size, window_size + len(test_inputs)))
     train_data_tup = (train_inputs, train_targets)
     test_data_tup  = (test_inputs,  test_targets)
 

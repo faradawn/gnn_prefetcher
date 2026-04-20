@@ -40,20 +40,23 @@ def batch_dense_adj_to_sparse(A_batch: torch.Tensor):
         edge_index  : (2, E) LongTensor  — on same device as A_batch
         edge_weight : (E,)   FloatTensor — on same device as A_batch
     """
-    B, N, _ = A_batch.shape
-    A_in = A_batch[:, :, :N]               # (B, N, N)
+    B, N, two_N = A_batch.shape
+    assert two_N == 2 * N
+    A_in = A_batch[:, :, :N]  # (B, N, N) — incoming adjacency only
 
-    # Fully vectorised: no Python loop over sessions.
-    # torch.nonzero preserves the device of A_batch.
-    indices = torch.nonzero(A_in)          # (E, 3): [batch, row, col]
+    # Find nonzero entries
+    # Using threshold to avoid near-zero float noise from normalization
+    mask = A_in > 1e-9                          # (B, N, N)
+    indices = mask.nonzero(as_tuple=False)       # (E, 3)
     b_idx, rows, cols = indices[:, 0], indices[:, 1], indices[:, 2]
 
-    edge_index  = torch.stack([rows + b_idx * N,
-                                cols + b_idx * N], dim=0)  # (2, E)
-    edge_weight = A_in[b_idx, rows, cols]                  # (E,)
+    # Offset node indices by batch — creates B disconnected subgraphs
+    global_rows = rows + b_idx * N
+    global_cols = cols + b_idx * N
+    edge_index  = torch.stack([global_cols, global_rows], dim=0)  # COO: [src, dst]
+    edge_weight = A_in[b_idx, rows, cols]
 
     return edge_index, edge_weight
-
 
 # ---------------------------------------------------------------------------
 # Spectral Prefetcher
@@ -77,10 +80,10 @@ class SpectralSessionGraph(Module):
         self.nonhybrid   = opt.nonhybrid
         dropout          = getattr(opt, 'dropout', 0.1)
 
-        self.embedding = nn.Embedding(n_node, d)
+        self.embedding = nn.Embedding(n_node, opt.window)
 
         # Pre-normalised adjacency: skip re-normalisation and self-loop insertion
-        self.gcn1 = GCNConv(d, d, add_self_loops=False, normalize=False)
+        self.gcn1 = GCNConv(opt.window, d, add_self_loops=False, normalize=False)
         self.gcn2 = GCNConv(d, d, add_self_loops=False, normalize=False)
         self.dropout = nn.Dropout(p=dropout)
 
@@ -89,6 +92,7 @@ class SpectralSessionGraph(Module):
         self.linear_two       = nn.Linear(d,     d, bias=True)
         self.linear_three     = nn.Linear(d,     1, bias=False)
         self.linear_transform = nn.Linear(d * 2, d, bias=True)
+        self.linear_final     = nn.Linear(d, opt.window, bias=False)
 
         self.loss_function = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.Adam(
@@ -151,9 +155,11 @@ class SpectralSessionGraph(Module):
 
         if not self.nonhybrid:
             a = self.linear_transform(torch.cat([a, ht], dim=1))
+            
+        a = self.linear_final(a)                                # (B, 150) -> (B, 32)
 
-        b = self.embedding.weight[1:]                           # (n_node-1, d)
-        return torch.matmul(a, b.T)                             # (B, n_node-1)
+        b = self.embedding.weight[1:]                           # (n_node-1, 32)
+        return torch.matmul(a, b.T)                             # (B, 32) * (32, n_node-1) -> (B, n_node-1)
 
 
 # ---------------------------------------------------------------------------

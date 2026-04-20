@@ -67,7 +67,7 @@ class Options:
         self.lr_dc_step      = 3
         self.l2              = 1e-5
         self.patience        = 3
-        self.nonhybrid       = False
+        self.nonhybrid       = True
         self.validation      = False
         self.valid_portion   = 0.1
         self.topn            = 20
