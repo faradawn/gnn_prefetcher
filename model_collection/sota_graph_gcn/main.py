@@ -69,7 +69,7 @@ class Options:
         self.patience        = 3
         self.nonhybrid       = False
         self.validation      = False
-        self.valid_portion   = 0.5
+        self.valid_portion   = 0.1
         self.topn            = 20
         self.dataset_percent = 1.0
         self.window          = 32
@@ -86,7 +86,7 @@ GRAPH_DICTS   = None
 # Assumed storage latencies (seconds) for access-speed metric
 SSD_MISS_LATENCY_S = 0.0001   # 0.1 ms
 HDD_MISS_LATENCY_S = 0.020    # 20  ms
-BLOCK_SIZE_KB      = 4        # assumed block size for effectiveness/overhead
+BLOCK_SIZE_KB      = 8        # normalized block size
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ BLOCK_SIZE_KB      = 4        # assumed block size for effectiveness/overhead
 def dict_generate(train_trace, top_num=1000):
     train_trace = train_trace.copy()
     train_trace['KB_Offset_Delta'] = (
-        train_trace['KB_Offset'] - train_trace['KB_Offset'].shift(-1)
+        train_trace['KB_Offset'].shift(-1) - train_trace['KB_Offset']
     ).fillna(0)
 
     a = train_trace['KB_Offset_Delta'].astype(int).unique().tolist()
