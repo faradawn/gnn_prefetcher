@@ -67,7 +67,7 @@ class Options:
         self.lr_dc_step      = 3
         self.l2              = 1e-5
         self.patience        = 3
-        self.nonhybrid       = True
+        self.nonhybrid       = False
         self.validation      = False
         self.valid_portion   = 0.1
         self.topn            = 20
@@ -87,6 +87,9 @@ GRAPH_DICTS   = None
 SSD_MISS_LATENCY_S = 0.0001   # 0.1 ms
 HDD_MISS_LATENCY_S = 0.020    # 20  ms
 BLOCK_SIZE_KB      = 8        # normalized block size
+
+# Cache sizes evaluated per-epoch and in the final summary
+MULTI_CACHE_SIZES = [10, 100, 1000]
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +133,7 @@ def trace2input(dicts, trace, window_size=32):
     for i in range(len(trace) - window_size - 1):
         window = []
         for j in range(i, i + window_size + 1):
-            diff = int(trace[j] - trace[j + 1])
+            diff = int(trace[j + 1] - trace[j])
             cls  = operation_id_map.get(diff, 999999)
             window.append(bo_map[cls] + 1 if cls in keys else bo_map[999999] + 1)
         inputs.append(window[:-1])
@@ -138,24 +141,41 @@ def trace2input(dicts, trace, window_size=32):
     return inputs, targets
 
 
+def expand_to_8kb_blocks(lba_arr, size_arr):
+    """Expand each I/O request into consecutive 8KB block accesses."""
+    n_blocks = np.maximum(1, np.ceil(np.nan_to_num(size_arr) / 8192).astype(np.int64))
+    cumsum   = np.concatenate([[0], np.cumsum(n_blocks[:-1])])
+    total    = int(n_blocks.sum())
+    row_idx  = np.repeat(np.arange(len(lba_arr)), n_blocks)
+    within   = np.arange(total) - np.repeat(cumsum, n_blocks)
+    return (lba_arr[row_idx] + within).tolist()
+
+
 def dataset2input(dataset, window_size=32, top_num=1000):
-    names = ['TimeStamp', 'KB_Offset']
+    names = ['TimeStamp', 'KB_Offset', 'Size']
     df = pd.read_csv(
         dataset, engine='python', skiprows=0,
         header=None, na_values=['-1'],
-        usecols=[0, 4], names=names
+        usecols=[0, 4, 5], names=names
     )
-    df['KB_Offset'] = df['KB_Offset'] // 1024
+    df['KB_Offset'] = df['KB_Offset'] // 8192
 
     print(f'\nReading trace: {dataset}')
-    print(f'Length of trace: {len(df)}')
+    print(f'Rows in trace: {len(df)}')
 
-    split = int(len(df) * -opt.valid_portion)
-    train_trace = df[:split]['KB_Offset'].tolist()
-    test_trace  = df[split + 1:]['KB_Offset'].tolist()
+    lba_list = expand_to_8kb_blocks(
+        df['KB_Offset'].values.astype(np.int64),
+        df['Size'].fillna(0).values,
+    )
+    lba_df = pd.DataFrame({'KB_Offset': lba_list})
+    print(f'Expanded to {len(lba_df)} 8KB block accesses')
+
+    split = int(len(lba_df) * -opt.valid_portion)
+    train_trace = lba_df[:split]['KB_Offset'].tolist()
+    test_trace  = lba_df[split + 1:]['KB_Offset'].tolist()
     print(f' train: {len(train_trace)}, test: {len(test_trace)}')
 
-    dicts  = dict_generate(df, top_num=top_num)
+    dicts  = dict_generate(lba_df, top_num=top_num)
     n_node = top_num + 3
 
     train_data = Data(tuple(trace2input(dicts, train_trace, window_size)), shuffle=True)
@@ -268,7 +288,7 @@ def single_cache_test(test_trace, arr_raw_pred, dicts,
         pred = arr_raw_pred[test_id] if test_id < len(arr_raw_pred) else 0
         if pred > 0:
             actual_delta    = operation_id_map_div[bo_map_div[pred - 1]]
-            lba_to_prefetch = last_lba - actual_delta
+            lba_to_prefetch = last_lba + actual_delta
             cache.push_prefetch(lba_to_prefetch)
             arr_lba_to_prefetch.append(lba_to_prefetch)
         else:
@@ -318,6 +338,56 @@ def single_cache_test(test_trace, arr_raw_pred, dicts,
         metrics['throughput_inf_per_s']     = n_inferences / inference_time_s if inference_time_s > 0 else 0
 
     return metrics, arr_lba_to_prefetch
+
+
+def single_cache_test_multi(test_trace, arr_raw_pred, test_wpos, dicts,
+                            save_name, cache_sizes=None):
+    """
+    Run cache simulation at multiple sizes over the full test trace.
+    Prefetch LBA = lba + delta (paper Eq. 4: lba_{n+1} = lba_n + ld_n).
+
+    test_trace  : ALL test LBAs in order.
+    arr_raw_pred: flat list of ints, one per prediction window.
+    test_wpos   : index into test_trace for each window endpoint;
+                  len == len(arr_raw_pred).
+    """
+    if cache_sizes is None:
+        cache_sizes = MULTI_CACHE_SIZES
+
+    bo_map, bo_map_div, operation_id_map, operation_id_map_div = dicts
+    pos_to_pred = {pos: pred for pos, pred in zip(test_wpos, arr_raw_pred)}
+    caches = {sz: CacheTest(sz) for sz in cache_sizes}
+
+    for pos, lba in enumerate(test_trace):
+        for cache in caches.values():
+            cache.push_normal(lba)
+        if pos in pos_to_pred:
+            pred = pos_to_pred[pos]
+            if pred > 0:
+                try:
+                    delta        = operation_id_map_div[bo_map_div[pred - 1]]
+                    prefetch_lba = lba + delta
+                    for cache in caches.values():
+                        cache.push_prefetch(prefetch_lba)
+                except (KeyError, IndexError):
+                    pass
+
+    hit_rates, prehit_rates, stats = [], [], []
+    for sz, cache in caches.items():
+        hr  = cache.get_hit_rate()
+        phr = cache.get_prehit_rate()
+        print(f'  cache={sz:5d}  HR={hr:.4f}  EPR={phr:.4f}')
+        hit_rates.append(hr)
+        prehit_rates.append(phr)
+        stats.append(cache.get_stats())
+
+    os.makedirs('hit_results', exist_ok=True)
+    safe = save_name.replace('/', '_').replace('\\', '_').replace('.', '_')
+    np.savetxt(f'hit_results/{safe}_hit_rate.txt',     hit_rates,    fmt='%.4f')
+    np.savetxt(f'hit_results/{safe}_pre_hit_rate.txt', prehit_rates, fmt='%.4f')
+    np.savetxt(f'hit_results/{safe}_stats.txt',        stats,        fmt='%d')
+
+    return hit_rates, prehit_rates
 
 
 def log_metrics(metrics, model, dataset_name):
@@ -380,7 +450,7 @@ def predict_next_lba(last_lba, historical_deltas):
     predicted_class = run_single_inference(TRAINED_MODEL, alias_input, items, A)
     actual_delta    = convert_class_to_delta(predicted_class)
     if actual_delta is not None:
-        return last_lba - actual_delta
+        return last_lba + actual_delta
     return None
 
 
@@ -412,6 +482,13 @@ def spectral_wrapper(raw_trace):
     train_data_list, train_slices, test_data, dicts, n_node, train_trace, test_trace = \
         dataset2input(dataset=raw_trace, window_size=opt.window, top_num=opt.topnum)
 
+    # Pre-compute test features used for both per-epoch eval and final inference
+    arr_delta_classes  = test_data.get_data_as_list()
+    test_trace_aligned = test_trace[opt.window:-1]
+    n_test             = len(arr_delta_classes)
+    # Position of each window endpoint within the full test_trace
+    test_wpos          = list(range(opt.window, opt.window + n_test))
+
     model = trans_to_cuda(SpectralSessionGraph(opt, n_node))
     model_path = os.path.join(
         'checkpoint',
@@ -419,20 +496,25 @@ def spectral_wrapper(raw_trace):
         time.strftime('%Y_%m_%d_%H_%M_%S', time.localtime())
     )
     os.makedirs(model_path, exist_ok=True)
+    safe_trace = raw_trace.replace('/', '_').replace('\\', '_').replace('.', '_')
 
-    # ---- Training ----
+    # ---- Training + per-epoch multi-cache evaluation ----
     print(f'\n=== Start training → {model_path}')
     for epoch in range(opt.epoch):
         print(f'===== epoch: {epoch}')
         model = training(model, train_data_list, train_slices)
 
+        epoch_pred = run_batched_inference(model, arr_delta_classes,
+                                           batch_size=opt.eval_batch_size)
+        print(f'\n  Cache evaluation (epoch {epoch}):')
+        single_cache_test_multi(test_trace, epoch_pred, test_wpos, dicts,
+                                save_name=f'{safe_trace}_epoch{epoch}')
+        torch.save(model, os.path.join(model_path, f'{epoch}.pt'))
+
     model.scheduler.step()
     model.eval()
 
-    # ---- Inference ----
-    arr_delta_classes  = test_data.get_data_as_list()
-    test_trace_aligned = test_trace[opt.window:-1]
-    n_test             = len(arr_delta_classes)
+    # ---- Final inference ----
     print(f'\nEvaluating {n_test} test cases...')
 
     t0 = time.time()
@@ -446,7 +528,7 @@ def spectral_wrapper(raw_trace):
     for idx, predicted_class in enumerate(arr_raw_pred):
         if predicted_class > 0:
             actual_delta    = operation_id_map_div[bo_map_div[predicted_class - 1]]
-            lba_to_prefetch = test_trace_aligned[idx] - actual_delta
+            lba_to_prefetch = test_trace_aligned[idx] + actual_delta
             arr_lba_to_prefetch.append(lba_to_prefetch)
         else:
             arr_lba_to_prefetch.append(0)
@@ -459,6 +541,11 @@ def spectral_wrapper(raw_trace):
         n_inferences=n_test,
     )
     log_metrics(metrics, model, raw_trace)
+
+    # Final multi-size cache evaluation at [10, 100, 1000]
+    print('\n=== Final multi-size cache evaluation:')
+    single_cache_test_multi(test_trace, arr_raw_pred, test_wpos, dicts,
+                            save_name=f'{safe_trace}_final')
 
     # ---- Save checkpoint ----
     torch.save(model, os.path.join(model_path, 'spectral_final.pt'))

@@ -46,9 +46,8 @@ GRAPH_DICTS   = None
 SSD_MISS_LATENCY_S = 0.0001   # 0.1 ms per SSD miss
 HDD_MISS_LATENCY_S = 0.020    # 20 ms per HDD miss
 
-# Cache sizes for multi-size evaluation — matches original paper's Table II/X range
-MULTI_CACHE_SIZES  = [5] + [i * 10 for i in range(1, 10)] + \
-                     [i * 100 for i in range(1, 11)]
+# Cache sizes evaluated per-epoch and in the final summary
+MULTI_CACHE_SIZES  = [10, 100, 1000]
 PRIMARY_CACHE_SIZE = 1000     # used for the detailed per-run summary
 
 
@@ -129,6 +128,16 @@ def trace2input(dicts, trace, window_size=32):
 
 
 
+def expand_to_8kb_blocks(lba_arr, size_arr):
+    """Expand each I/O request into consecutive 8KB block accesses."""
+    n_blocks = np.maximum(1, np.ceil(np.nan_to_num(size_arr) / 8192).astype(np.int64))
+    cumsum   = np.concatenate([[0], np.cumsum(n_blocks[:-1])])
+    total    = int(n_blocks.sum())
+    row_idx  = np.repeat(np.arange(len(lba_arr)), n_blocks)
+    within   = np.arange(total) - np.repeat(cumsum, n_blocks)
+    return (lba_arr[row_idx] + within).tolist()
+
+
 def dataset2input(dataset, window_size=32, method='top', top_num=1000):
     """
     Loads trace, sorts by timestamp (original paper), splits 90/10,
@@ -138,25 +147,32 @@ def dataset2input(dataset, window_size=32, method='top', top_num=1000):
     if method != 'top':
         raise ValueError("Only 'top' method is supported.")
 
-    names     = ['TimeStamp', 'KB_Offset']
     lba_trace = dataset
     df = pd.read_csv(lba_trace, engine='python', skiprows=0, header=None,
-                     na_values=['-1'], usecols=[0, 4], names=names)
-    df['KB_Offset'] = df['KB_Offset'] // 1024
+                     na_values=['-1'], usecols=[0, 4, 5],
+                     names=['TimeStamp', 'KB_Offset', 'Size'])
+    df['KB_Offset'] = df['KB_Offset'] // 8192
 
-    # ADDED: sort by timestamp before splitting — matches original paper
+    # Sort by timestamp before expansion so blocks stay in temporal order
     df = df.sort_values(by=['TimeStamp']).reset_index(drop=True)
 
     print(f'\nReading trace: {lba_trace}')
-    print(f'Length of trace: {len(df)}')
+    print(f'Rows in trace: {len(df)}')
 
-    split_idx   = int(len(df) * -opt.valid_portion)
-    train_trace = df[:split_idx]['KB_Offset'].tolist()
-    test_trace  = df[split_idx + 1:]['KB_Offset'].tolist()
+    lba_list = expand_to_8kb_blocks(
+        df['KB_Offset'].values.astype(np.int64),
+        df['Size'].fillna(0).values,
+    )
+    lba_df = pd.DataFrame({'KB_Offset': lba_list})
+    print(f'Expanded to {len(lba_df)} 8KB block accesses')
+
+    split_idx   = int(len(lba_df) * -opt.valid_portion)
+    train_trace = lba_df[:split_idx]['KB_Offset'].tolist()
+    test_trace  = lba_df[split_idx + 1:]['KB_Offset'].tolist()
     print(f' train: {len(train_trace)}, test: {len(test_trace)}')
 
-    # Build vocabulary from the full trace (original paper protocol)
-    dicts = dict_generate(df, top_num=top_num)
+    # Build vocabulary from the full expanded trace (original paper protocol)
+    dicts = dict_generate(lba_df, top_num=top_num)
 
     # Flat sliding window over the full train/test traces (no stream splitting).
     # Window i ends at position (i + window_size) in each sub-trace, so
@@ -525,6 +541,18 @@ def graph_wrapper(raw_trace):
         n_inferences         = len(test_inputs),
     )
     log_metrics(metrics, model, raw_trace)
+
+    # Final multi-size cache evaluation at [10, 100, 1000]
+    print('\n=== Final multi-size cache evaluation:')
+    arr_pred_wrapped = [np.array([p]) for p in arr_raw_pred]
+    single_cache_test_multi(
+        test_trace_full      = test_trace,
+        all_pred             = arr_pred_wrapped,
+        save_name            = raw_trace.replace('/', '_').replace('\\', '_').replace('.', '_') + '_final',
+        dicts                = dicts,
+        window_end_positions = test_wpos,
+        cache_sizes          = MULTI_CACHE_SIZES,
+    )
 
     torch.cuda.empty_cache()
     return arr_lba_to_prefetch, len(test_trace)
