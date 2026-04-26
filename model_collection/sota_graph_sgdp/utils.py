@@ -45,14 +45,22 @@ def _build_hybrid_A(u_input, node):
     n       = len(node)
     seq_len = len(u_input)
 
+    node_to_idx = {v: i for i, v in enumerate(node)}
+
+    valid_len = seq_len
+    for k in range(1, seq_len):
+        if u_input[k] == 0:
+            valid_len = k
+            break
+
+    indices = np.array([node_to_idx[x] for x in u_input[:valid_len]])
+
     # ---- Sequential connect matrix M_S (Eq. 5) ----------------------------
     A_seq = np.zeros((n, n))
-    for i in range(seq_len - 1):
-        if u_input[i + 1] == 0:
-            break
-        u = int(np.where(node == u_input[i])[0][0])
-        v = int(np.where(node == u_input[i + 1])[0][0])
-        A_seq[u][v] += 1
+    if valid_len > 1:
+        src, dst = indices[:-1], indices[1:]
+        coords = src * n + dst
+        A_seq = np.bincount(coords, minlength=n * n).reshape(n, n).astype(float)
 
     col_sum = A_seq.sum(axis=0); col_sum[col_sum == 0] = 1
     A_seq_in  = A_seq / col_sum
@@ -60,18 +68,14 @@ def _build_hybrid_A(u_input, node):
     A_seq_out = (A_seq.T / row_sum)
 
     # ---- Full-connect matrix M_F (Eq. 6, 1/distance weighting) ------------
-    # Bug fix: range must use seq_len (not n) so all future positions are
-    # visited when the window is longer than the number of unique nodes.
     A_full = np.zeros((n, n))
-    for i in range(seq_len - 1):
-        if u_input[i + 1] == 0:
-            break
-        u = int(np.where(node == u_input[i])[0][0])
-        for dist in range(1, seq_len - i - 1):
-            if u_input[i + dist] == 0:
-                break
-            v = int(np.where(node == u_input[i + dist])[0][0])
-            A_full[u][v] += 1.0 / dist   # inverse-distance per Eq. 6
+    if valid_len > 1:
+        ii, jj = np.triu_indices(valid_len, k=1)
+        u_batch = indices[ii]
+        v_batch = indices[jj]
+        weights = 1.0 / (jj - ii).astype(float)
+        coords  = u_batch * n + v_batch
+        A_full  = np.bincount(coords, weights=weights, minlength=n * n).reshape(n, n)
 
     col_sum = A_full.sum(axis=0); col_sum[col_sum == 0] = 1
     A_full_in  = A_full / col_sum
@@ -83,7 +87,7 @@ def _build_hybrid_A(u_input, node):
     A_out = 0.5 * A_seq_out + 0.5 * A_full_out
     u_A   = np.concatenate([A_in, A_out]).T   # shape (n, 2n)
 
-    alias = [int(np.where(node == x)[0][0]) for x in u_input]
+    alias = [node_to_idx[x] for x in u_input]
     return u_A, alias
 
 

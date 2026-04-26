@@ -151,7 +151,7 @@ def run_single_inference(model, historical_deltas):
     mask         = [[1] * len(input_feature)]
     input_feature = trans_to_cuda(torch.Tensor([input_feature]).long())
     items         = trans_to_cuda(torch.Tensor(items).long())
-    A             = trans_to_cuda(torch.Tensor(A).float())
+    A             = trans_to_cuda(torch.from_numpy(np.array(A)).float())
     mask          = trans_to_cuda(torch.Tensor(mask).long())
 
     hidden = trans_to_cuda(model(items, A))

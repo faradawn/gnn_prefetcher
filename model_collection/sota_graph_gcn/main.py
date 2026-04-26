@@ -159,6 +159,9 @@ def dataset2input(dataset, window_size=32, top_num=1000):
         usecols=[0, 4, 5], names=names
     )
     df['KB_Offset'] = df['KB_Offset'] // 8192
+    
+    # Sort by timestamp before expansion so blocks stay in temporal order
+    df = df.sort_values(by=['TimeStamp']).reset_index(drop=True)
 
     print(f'\nReading trace: {dataset}')
     print(f'Rows in trace: {len(df)}')

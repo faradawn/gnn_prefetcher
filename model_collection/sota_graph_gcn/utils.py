@@ -83,25 +83,25 @@ class Data():
         max_n_node = np.max(n_node)
         for u_input in inputs:
             node = np.unique(u_input)
-            # print("NODE 0", node)
             items.append(node.tolist() + (max_n_node - len(node)) * [0])
+            node_to_idx = {v: k for k, v in enumerate(node)}
+
+            valid_len = len(u_input)
+            for k in range(1, len(u_input)):
+                if u_input[k] == 0:
+                    valid_len = k
+                    break
+
+            indices = np.array([node_to_idx[x] for x in u_input[:valid_len]])
+
             u_A = np.zeros((max_n_node, max_n_node))
+            if valid_len > 1:
+                ii, jj = np.triu_indices(valid_len, k=1)
+                u_A[indices[ii], indices[jj]] = 1
+                src, dst = indices[:-1], indices[1:]
+                coords = src * max_n_node + dst
+                u_A += np.bincount(coords, minlength=max_n_node * max_n_node).reshape(max_n_node, max_n_node)
 
-            for i in np.arange(len(u_input) - 1):
-                if u_input[i + 1] == 0:
-                    break
-                u = np.where(node == u_input[i])[0][0]
-                for j in np.arange(1, len(node)-i-1):
-                    v = np.where(node == u_input[i + j])[0][0]
-                    u_A[u][v] = 1
-
-            for i in np.arange(len(u_input) - 1):
-                if u_input[i + 1] == 0:
-                    break
-                u = np.where(node == u_input[i])[0][0]
-                v = np.where(node == u_input[i + 1])[0][0]
-                u_A[u][v] += 1
-                    
             u_sum_in = np.sum(u_A, 0)
             u_sum_in[np.where(u_sum_in == 0)] = 1
             u_A_in = np.divide(u_A, u_sum_in)
@@ -110,42 +110,34 @@ class Data():
             u_A_out = np.divide(u_A.transpose(), u_sum_out)
             u_A = np.concatenate([u_A_in, u_A_out]).transpose()
             A.append(u_A)
-            alias_inputs.append([np.where(node == i)[0][0] for i in u_input])
-            # print()
-            # print("ALIAS", alias_inputs)
-            # exit(0)
+            alias_inputs.append([node_to_idx[x] for x in u_input])
 
         # print(alias_inputs[0])
         # exit(0)
         return alias_inputs, A, items, mask, targets
 
     def get_one_slice(self, i):
-        historical_deltas = self.inputs[i][0] # getting test data in the row i
-        # print( " historical_deltas ", type(historical_deltas), len(historical_deltas), historical_deltas.tolist())
-        # print("INPUT[0]", inputs[0])
-        # Q: What is A? graph matrix
-        # Q: What is node? storing the delta info
-        A, alias_inputs = [], []
-        max_unique_count = len(np.unique(historical_deltas))
-        unique_deltas = np.unique(historical_deltas).tolist() 
-        
-        u_A = np.zeros((max_unique_count, max_unique_count))
+        historical_deltas = self.inputs[i][0]
+        node = np.unique(historical_deltas)
+        n = len(node)
+        node_to_idx = {v: k for k, v in enumerate(node)}
 
-        for i in np.arange(len(historical_deltas) - 1):
-            if historical_deltas[i + 1] == 0:
+        valid_len = len(historical_deltas)
+        for k in range(1, len(historical_deltas)):
+            if historical_deltas[k] == 0:
+                valid_len = k
                 break
-            u = np.where(unique_deltas == historical_deltas[i])[0][0]
-            for j in np.arange(1, len(unique_deltas)-i-1):
-                v = np.where(unique_deltas == historical_deltas[i + j])[0][0]
-                u_A[u][v] = 1
 
-        for i in np.arange(len(historical_deltas) - 1):
-            if historical_deltas[i + 1] == 0:
-                break
-            u = np.where(unique_deltas == historical_deltas[i])[0][0]
-            v = np.where(unique_deltas == historical_deltas[i + 1])[0][0]
-            u_A[u][v] += 1
-                
+        indices = np.array([node_to_idx[x] for x in historical_deltas[:valid_len]])
+
+        u_A = np.zeros((n, n))
+        if valid_len > 1:
+            ii, jj = np.triu_indices(valid_len, k=1)
+            u_A[indices[ii], indices[jj]] = 1
+            src, dst = indices[:-1], indices[1:]
+            coords = src * n + dst
+            u_A += np.bincount(coords, minlength=n * n).reshape(n, n)
+
         u_sum_in = np.sum(u_A, 0)
         u_sum_in[np.where(u_sum_in == 0)] = 1
         u_A_in = np.divide(u_A, u_sum_in)
@@ -153,41 +145,31 @@ class Data():
         u_sum_out[np.where(u_sum_out == 0)] = 1
         u_A_out = np.divide(u_A.transpose(), u_sum_out)
         u_A = np.concatenate([u_A_in, u_A_out]).transpose()
-        A.append(u_A)
-        alias_inputs.append([np.where(unique_deltas == i)[0][0] for i in historical_deltas])
-        # print(" historical_deltas ", len(historical_deltas), historical_deltas.tolist())
-        # print("unique_deltas ", len(unique_deltas), unique_deltas)
-        # print(" A ", len(A), np.array(A).shape)
-        # print(" alias_inputs ", np.array(alias_inputs).shape, alias_inputs)
-        # print(" A ", A)
-        # exit(0)
-        return alias_inputs, A, [unique_deltas]
+        return [[node_to_idx[x] for x in historical_deltas]], [u_A], [node.tolist()]
 
 def build_adjacency_matrix_and_alias(historical_deltas):
-    # print( " historical_deltas ", type(historical_deltas), len(historical_deltas), historical_deltas.tolist())
-    A, alias_inputs = [], []
-    max_unique_count = len(np.unique(historical_deltas))
     if type(historical_deltas) == list:
         historical_deltas = np.array(historical_deltas)
-    unique_deltas = np.unique(historical_deltas).tolist() 
-    
-    u_A = np.zeros((max_unique_count, max_unique_count))
+    node = np.unique(historical_deltas)
+    n = len(node)
+    node_to_idx = {v: k for k, v in enumerate(node)}
 
-    for i in np.arange(len(historical_deltas) - 1):
-        if historical_deltas[i + 1] == 0:
+    valid_len = len(historical_deltas)
+    for k in range(1, len(historical_deltas)):
+        if historical_deltas[k] == 0:
+            valid_len = k
             break
-        u = np.where(unique_deltas == historical_deltas[i])[0][0]
-        for j in np.arange(1, len(unique_deltas)-i-1):
-            v = np.where(unique_deltas == historical_deltas[i + j])[0][0]
-            u_A[u][v] = 1
 
-    for i in np.arange(len(historical_deltas) - 1):
-        if historical_deltas[i + 1] == 0:
-            break
-        u = np.where(unique_deltas == historical_deltas[i])[0][0]
-        v = np.where(unique_deltas == historical_deltas[i + 1])[0][0]
-        u_A[u][v] += 1
-            
+    indices = np.array([node_to_idx[x] for x in historical_deltas[:valid_len]])
+
+    u_A = np.zeros((n, n))
+    if valid_len > 1:
+        ii, jj = np.triu_indices(valid_len, k=1)
+        u_A[indices[ii], indices[jj]] = 1
+        src, dst = indices[:-1], indices[1:]
+        coords = src * n + dst
+        u_A += np.bincount(coords, minlength=n * n).reshape(n, n)
+
     u_sum_in = np.sum(u_A, 0)
     u_sum_in[np.where(u_sum_in == 0)] = 1
     u_A_in = np.divide(u_A, u_sum_in)
@@ -195,10 +177,7 @@ def build_adjacency_matrix_and_alias(historical_deltas):
     u_sum_out[np.where(u_sum_out == 0)] = 1
     u_A_out = np.divide(u_A.transpose(), u_sum_out)
     u_A = np.concatenate([u_A_in, u_A_out]).transpose()
-    A.append(u_A)
-    alias_inputs.append([np.where(unique_deltas == i)[0][0] for i in historical_deltas])
-
-    return alias_inputs, A, [unique_deltas]
+    return [[node_to_idx[x] for x in historical_deltas]], [u_A], [node.tolist()]
     
 
 def topn_test():
