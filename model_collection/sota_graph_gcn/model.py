@@ -1,7 +1,7 @@
 """
 model.py — Spectral Prefetcher using torch_geometric GCNConv
 
-Architecture (paper Section 4):
+Base architecture (paper Section 4):
     H = σ₂( Ã · σ₁( Ã · X · W⁽⁰⁾ ) · W⁽¹⁾ )
 
 The adjacency matrix returned by build_adjacency_matrix_and_alias is already
@@ -64,7 +64,8 @@ def batch_dense_adj_to_sparse(A_batch: torch.Tensor):
 
 class SpectralSessionGraph(Module):
     """
-    Two-layer Spectral GCN + soft-attention scoring head (SR-GNN / SGDP style).
+    Configurable-depth Spectral GCN + soft-attention scoring head
+    (SR-GNN / SGDP style).
 
     Since the incoming adjacency is already normalised by the SGDP pipeline,
     GCNConv runs with add_self_loops=False and normalize=False to avoid
@@ -78,13 +79,22 @@ class SpectralSessionGraph(Module):
         self.n_node      = n_node
         self.batch_size  = opt.batchSize
         self.nonhybrid   = opt.nonhybrid
+        self.num_layers  = getattr(opt, 'numLayers', 2)
         dropout          = getattr(opt, 'dropout', 0.1)
+
+        if self.num_layers < 1:
+            raise ValueError(f"numLayers must be >= 1, got {self.num_layers}")
 
         self.embedding = nn.Embedding(n_node, opt.window)
 
         # Pre-normalised adjacency: skip re-normalisation and self-loop insertion
-        self.gcn1 = GCNConv(opt.window, d, add_self_loops=False, normalize=False)
-        self.gcn2 = GCNConv(d, d, add_self_loops=False, normalize=False)
+        self.gcn_layers = nn.ModuleList([
+            GCNConv(opt.window, d, add_self_loops=False, normalize=False)
+        ])
+        for _ in range(1, self.num_layers):
+            self.gcn_layers.append(
+                GCNConv(d, d, add_self_loops=False, normalize=False)
+            )
         self.dropout = nn.Dropout(p=dropout)
 
         # Soft-attention head (identical to SR-GNN / SGDP for fair comparison)
@@ -128,10 +138,10 @@ class SpectralSessionGraph(Module):
         # Convert dense adjacency to sparse COO (vectorised, device-safe)
         edge_index, edge_weight = batch_dense_adj_to_sparse(A)
 
-        # Two GCNConv layers
-        x = F.relu(self.gcn1(x, edge_index, edge_weight))
-        x = self.dropout(x)
-        x = F.relu(self.gcn2(x, edge_index, edge_weight))
+        for layer_idx, gcn in enumerate(self.gcn_layers):
+            x = F.relu(gcn(x, edge_index, edge_weight))
+            if layer_idx < self.num_layers - 1:
+                x = self.dropout(x)
 
         return x.view(B, N, -1)
 

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-no_prefetch/main.py
+no_prefetch/main_normalize.py
+
+Same as main.py but with 8KB block normalization:
+  - byte offsets are divided by 8192 to get block addresses
+  - each multi-block request is expanded into consecutive block accesses
 
 Evaluates a pure LRU cache with no prefetching at cache sizes [10, 100, 1000].
-Provides the lower-bound baseline for comparison with SGDP and Spectral GCN.
-
-Same 90/10 train/test split and MSR-Cambridge CSV format as SGDP/GCN.
 """
 
 import os
@@ -25,18 +26,33 @@ HDD_MISS_LATENCY_S = 0.020    # 20  ms per HDD miss
 # Trace loading
 # ---------------------------------------------------------------------------
 
+def expand_to_8kb_blocks(lba_arr, size_arr):
+    """Expand each I/O request into consecutive 8KB block accesses."""
+    n_blocks = np.maximum(1, np.ceil(np.nan_to_num(size_arr) / 8192).astype(np.int64))
+    cumsum   = np.concatenate([[0], np.cumsum(n_blocks[:-1])])
+    total    = int(n_blocks.sum())
+    row_idx  = np.repeat(np.arange(len(lba_arr)), n_blocks)
+    within   = np.arange(total) - np.repeat(cumsum, n_blocks)
+    return (lba_arr[row_idx] + within).tolist()
+
+
 def load_test_trace(dataset):
     df = pd.read_csv(dataset, engine='python', skiprows=0, header=None,
-                     na_values=['-1'], usecols=[0, 4],
-                     names=['TimeStamp', 'Offset'])
+                     na_values=['-1'], usecols=[0, 4, 5],
+                     names=['TimeStamp', 'KB_Offset', 'Size'])
+    df['KB_Offset'] = df['KB_Offset'] // 8192
     df = df.sort_values(by=['TimeStamp']).reset_index(drop=True)
-    
+
     #df = df.head(600000)
-    
+
     print(f'\nReading trace: {dataset}')
     print(f'Rows in trace : {len(df)}')
 
-    lba_list = df['Offset'].values.tolist()
+    lba_list = expand_to_8kb_blocks(
+        df['KB_Offset'].values.astype(np.int64),
+        df['Size'].fillna(0).values,
+    )
+    print(f'Expanded to {len(lba_list)} 8KB block accesses')
 
     split_idx   = int(len(lba_list) * -VALID_PORTION)
     train_trace = lba_list[:split_idx]
@@ -96,7 +112,7 @@ def log_metrics(hit_rates, prehit_rates, stats, dataset_name):
     spd_hdd  = total_ios / hdd_dur if hdd_dur > 0 else float('inf')
 
     print('\n' + '=' * 60)
-    print('  NO PREFETCH — EVALUATION RESULTS')
+    print('  NO PREFETCH (8KB NORMALIZED) — EVALUATION RESULTS')
     print(f'  Dataset : {dataset_name}')
     print('=' * 60)
     for sz, hr, phr in zip(CACHE_SIZES, hit_rates, prehit_rates):
@@ -113,10 +129,10 @@ def log_metrics(hit_rates, prehit_rates, stats, dataset_name):
 # ---------------------------------------------------------------------------
 
 def no_prefetch_wrapper(raw_trace):
-    print(f'no_prefetch_wrapper: {raw_trace}')
+    print(f'no_prefetch_wrapper (normalized): {raw_trace}')
     test_trace = load_test_trace(raw_trace)
 
-    print('\n=== Evaluating LRU cache (no prefetching):')
+    print('\n=== Evaluating LRU cache (no prefetching, 8KB normalized):')
     hit_rates, prehit_rates, stats = cache_eval(test_trace, raw_trace)
     log_metrics(hit_rates, prehit_rates, stats, raw_trace)
 
@@ -124,4 +140,4 @@ def no_prefetch_wrapper(raw_trace):
 
 
 if __name__ == '__main__':
-    no_prefetch_wrapper('dataset/MSR-Cambridge/src1_2.csv.gz')
+    no_prefetch_wrapper('dataset/MSR-Cambridge/prxy_0.csv.gz')

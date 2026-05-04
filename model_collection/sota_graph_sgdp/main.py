@@ -155,6 +155,8 @@ def dataset2input(dataset, window_size=32, method='top', top_num=1000):
 
     # Sort by timestamp before expansion so blocks stay in temporal order
     df = df.sort_values(by=['TimeStamp']).reset_index(drop=True)
+    
+    df = df.head(600000)
 
     print(f'\nReading trace: {lba_trace}')
     print(f'Rows in trace: {len(df)}')
@@ -559,6 +561,6 @@ def graph_wrapper(raw_trace):
 
 
 if __name__ == '__main__':
-    arr_lba_to_prefetch, n_tests = graph_wrapper('dataset/MSR-Cambridge/hm_1.csv.gz')
+    arr_lba_to_prefetch, n_tests = graph_wrapper('dataset/MSR-Cambridge/src1_2.csv.gz')
     print('Number of test IOs:', n_tests)
     print('Sample prefetch addresses:', arr_lba_to_prefetch[:10])

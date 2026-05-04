@@ -60,7 +60,8 @@ except ImportError:
 class Options:
     def __init__(self):
         self.batchSize       = 128
-        self.hiddenSize      = 150
+        self.hiddenSize      = 128
+        self.numLayers       = 2
         self.epoch           = 10
         self.lr              = 0.001
         self.lr_dc           = 0.1
@@ -90,6 +91,14 @@ BLOCK_SIZE_KB      = 8        # normalized block size
 
 # Cache sizes evaluated per-epoch and in the final summary
 MULTI_CACHE_SIZES = [10, 100, 1000]
+
+# Experiment grid for GCN depth and hidden dimension sweeps
+EXPERIMENT_LAYER_COUNTS = [1, 2, 3]
+EXPERIMENT_HIDDEN_SIZES = [16, 32, 64, 128, 256]
+
+
+def current_config_tag():
+    return f'h{opt.hiddenSize}_l{opt.numLayers}'
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +171,8 @@ def dataset2input(dataset, window_size=32, top_num=1000):
     
     # Sort by timestamp before expansion so blocks stay in temporal order
     df = df.sort_values(by=['TimeStamp']).reset_index(drop=True)
+    
+    df = df.head(600000)
 
     print(f'\nReading trace: {dataset}')
     print(f'Rows in trace: {len(df)}')
@@ -399,6 +410,7 @@ def log_metrics(metrics, model, dataset_name):
     print('\n' + '=' * 60)
     print(f'  SPECTRAL PREFETCHER — EVALUATION RESULTS')
     print(f'  Dataset : {dataset_name}')
+    print(f'  Config  : hidden={opt.hiddenSize}, layers={opt.numLayers}')
     print('=' * 60)
     print(f"  Hit Rate                  : {metrics['hit_rate']:.2f}%")
     print(f"  Prefetch Hit Rate         : {metrics['prehit_rate']:.2f}%")
@@ -481,6 +493,8 @@ def train_model(dataset):
 
 def spectral_wrapper(raw_trace):
     print(f"spectral_wrapper: {raw_trace}")
+    config_tag = current_config_tag()
+    print(f"Experiment config: hiddenSize={opt.hiddenSize}, numLayers={opt.numLayers}")
 
     train_data_list, train_slices, test_data, dicts, n_node, train_trace, test_trace = \
         dataset2input(dataset=raw_trace, window_size=opt.window, top_num=opt.topnum)
@@ -495,7 +509,7 @@ def spectral_wrapper(raw_trace):
     model = trans_to_cuda(SpectralSessionGraph(opt, n_node))
     model_path = os.path.join(
         'checkpoint',
-        'spectral_' + os.path.basename(str(raw_trace)) + '_' +
+        'spectral_' + os.path.basename(str(raw_trace)) + '_' + config_tag + '_' +
         time.strftime('%Y_%m_%d_%H_%M_%S', time.localtime())
     )
     os.makedirs(model_path, exist_ok=True)
@@ -511,7 +525,7 @@ def spectral_wrapper(raw_trace):
                                            batch_size=opt.eval_batch_size)
         print(f'\n  Cache evaluation (epoch {epoch}):')
         single_cache_test_multi(test_trace, epoch_pred, test_wpos, dicts,
-                                save_name=f'{safe_trace}_epoch{epoch}')
+                                save_name=f'{safe_trace}_{config_tag}_epoch{epoch}')
         torch.save(model, os.path.join(model_path, f'{epoch}.pt'))
 
     model.scheduler.step()
@@ -548,7 +562,7 @@ def spectral_wrapper(raw_trace):
     # Final multi-size cache evaluation at [10, 100, 1000]
     print('\n=== Final multi-size cache evaluation:')
     single_cache_test_multi(test_trace, arr_raw_pred, test_wpos, dicts,
-                            save_name=f'{safe_trace}_final')
+                            save_name=f'{safe_trace}_{config_tag}_final')
 
     # ---- Save checkpoint ----
     torch.save(model, os.path.join(model_path, 'spectral_final.pt'))
@@ -562,8 +576,20 @@ def spectral_wrapper(raw_trace):
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    arr_lba_to_prefetch, n_tests = spectral_wrapper(
-        'dataset/MSR-Cambridge/hm_1.csv.gz'
-    )
-    print(f'Number of test IOs : {n_tests}')
-    print(f'Sample prefetch addresses: {arr_lba_to_prefetch[:10]}')
+    raw_trace = 'dataset/MSR-Cambridge/hm_1.csv.gz'
+
+    for num_layers in EXPERIMENT_LAYER_COUNTS:
+        for hidden_size in EXPERIMENT_HIDDEN_SIZES:
+            opt.numLayers = num_layers
+            opt.hiddenSize = hidden_size
+
+            print('\n' + '#' * 72)
+            print(
+                f'Running GCN experiment: hiddenSize={hidden_size}, '
+                f'numLayers={num_layers}'
+            )
+            print('#' * 72)
+
+            arr_lba_to_prefetch, n_tests = spectral_wrapper(raw_trace)
+            print(f'Number of test IOs : {n_tests}')
+            print(f'Sample prefetch addresses: {arr_lba_to_prefetch[:10]}')
