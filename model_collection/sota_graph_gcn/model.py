@@ -11,6 +11,7 @@ to avoid double-normalising or double-adding self-loops.
 """
 
 import math
+import sys
 import numpy as np
 import torch
 import torch.nn as nn
@@ -256,7 +257,8 @@ def training(model: SpectralSessionGraph, train_data_list, train_slices):
     total_loss = 0.0
 
     for train_data, _, j in tqdm(
-        zip(train_data_list, train_slices, np.arange(len(train_slices)))
+        zip(train_data_list, train_slices, np.arange(len(train_slices))),
+        disable=not sys.stderr.isatty(),
     ):
         model.optimizer.zero_grad()
         targets, scores = forward(model, None, train_data)

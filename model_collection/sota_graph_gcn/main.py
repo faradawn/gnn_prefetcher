@@ -18,6 +18,7 @@ Metrics logged (per paper Section 5.3):
 """
 
 import os
+import sys
 import time
 import torch
 import numpy as np
@@ -60,8 +61,8 @@ except ImportError:
 class Options:
     def __init__(self):
         self.batchSize       = 128
-        self.hiddenSize      = 128
-        self.numLayers       = 2
+        self.hiddenSize      = 16
+        self.numLayers       = 3
         self.epoch           = 10
         self.lr              = 0.001
         self.lr_dc           = 0.1
@@ -89,12 +90,17 @@ SSD_MISS_LATENCY_S = 0.0001   # 0.1 ms
 HDD_MISS_LATENCY_S = 0.020    # 20  ms
 BLOCK_SIZE_KB      = 8        # normalized block size
 
-# Cache sizes evaluated per-epoch and in the final summary
-MULTI_CACHE_SIZES = [10, 100, 1000]
+# Cache size evaluated per-epoch and in the final summary
+MULTI_CACHE_SIZES = [1000]
 
-# Experiment grid for GCN depth and hidden dimension sweeps
-EXPERIMENT_LAYER_COUNTS = [1, 2, 3]
-EXPERIMENT_HIDDEN_SIZES = [16, 32, 64, 128, 256]
+# MSR-Cambridge traces used for the final comparison table.
+EXPERIMENT_TRACES = [
+    'datasets/MSR-Cambridge/mds_0.csv.gz',
+    'datasets/MSR-Cambridge/proj_0.csv.gz',
+    'datasets/MSR-Cambridge/src1_2.csv.gz',
+    'datasets/MSR-Cambridge/hm_1.csv.gz',
+    'datasets/MSR-Cambridge/prxy_0.csv.gz',
+]
 
 
 def current_config_tag():
@@ -218,7 +224,11 @@ def run_batched_inference(model, arr_delta_classes, batch_size=512):
     # Pre-build all graph features
     print('  Building graph features...')
     all_alias, all_items, all_A = [], [], []
-    for delta_classes in tqdm(arr_delta_classes, desc='  Graph build'):
+    for delta_classes in tqdm(
+        arr_delta_classes,
+        desc='  Graph build',
+        disable=not sys.stderr.isatty(),
+    ):
         [alias_input], A, items = build_adjacency_matrix_and_alias(delta_classes)
         # Flatten any spurious leading batch dim from build_adjacency_matrix_and_alias
         alias_input = np.array(alias_input).reshape(-1)       # (seq,)
@@ -236,7 +246,11 @@ def run_batched_inference(model, arr_delta_classes, batch_size=512):
 
     print('  Running batched inference...')
     with torch.no_grad():
-        for start in tqdm(range(0, n, batch_size), desc='  Inference'):
+        for start in tqdm(
+            range(0, n, batch_size),
+            desc='  Inference',
+            disable=not sys.stderr.isatty(),
+        ):
             end = min(start + batch_size, n)
             b_alias = all_alias[start:end]
             b_items = all_items[start:end]
@@ -576,20 +590,17 @@ def spectral_wrapper(raw_trace):
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    raw_trace = 'dataset/MSR-Cambridge/hm_1.csv.gz'
+    opt.hiddenSize = 64
+    opt.numLayers = 2
 
-    for num_layers in EXPERIMENT_LAYER_COUNTS:
-        for hidden_size in EXPERIMENT_HIDDEN_SIZES:
-            opt.numLayers = num_layers
-            opt.hiddenSize = hidden_size
+    for raw_trace in EXPERIMENT_TRACES:
+        print('\n' + '#' * 72)
+        print(
+            f'Running GCN experiment: trace={raw_trace}, '
+            f'hiddenSize={opt.hiddenSize}, numLayers={opt.numLayers}'
+        )
+        print('#' * 72)
 
-            print('\n' + '#' * 72)
-            print(
-                f'Running GCN experiment: hiddenSize={hidden_size}, '
-                f'numLayers={num_layers}'
-            )
-            print('#' * 72)
-
-            arr_lba_to_prefetch, n_tests = spectral_wrapper(raw_trace)
-            print(f'Number of test IOs : {n_tests}')
-            print(f'Sample prefetch addresses: {arr_lba_to_prefetch[:10]}')
+        arr_lba_to_prefetch, n_tests = spectral_wrapper(raw_trace)
+        print(f'Number of test IOs : {n_tests}')
+        print(f'Sample prefetch addresses: {arr_lba_to_prefetch[:10]}')
