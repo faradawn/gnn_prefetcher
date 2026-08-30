@@ -2,6 +2,95 @@ import networkx as nx
 import numpy as np
 
 
+# ---------------------------------------------------------------------------
+# Shared adjacency builder — used by get_slice, get_one_slice, and
+# build_adjacency_matrix_and_alias.
+#
+# Implements the hybrid connection matrix M_h from the SGDP paper:
+#   M_S  — sequential connect matrix (Eq. 5): edges between consecutive deltas
+#   M_F  — full-connect matrix (Eq. 6): every delta connected to every later
+#           delta in the stream, with edge weight 1/|b-a| (inverse distance)
+#   M_h  — normalised M_S and M_F are combined with equal weighting (0.5 each)
+#           and concatenated as [in | out] per the SR-GNN convention.
+#
+# Bug fixes vs. original implementation:
+#   1. Full-connect inner loop used len(node) (# unique nodes) as the upper
+#      bound instead of len(u_input) (sequence length), so most future
+#      positions were silently skipped when the sequence was longer than the
+#      vocabulary.
+#   2. Full-connect edges were unweighted (=1) — paper Eq. 6 specifies
+#      weight 1/|b-a|, so closer pairs get stronger connections.
+#   3. M_S and M_F were added into a single matrix before normalisation, so
+#      the in/out sums mixed sequential counts with full-connect weights.
+#      They are now normalised independently before the weighted sum.
+# ---------------------------------------------------------------------------
+
+def _build_hybrid_A(u_input, node):
+    """
+    Parameters
+    ----------
+    u_input : array-like of int, shape (seq_len,)
+        Encoded delta-class sequence (may contain trailing 0-padding;
+        processing stops at the first 0 after position 0).
+    node : array-like of int
+        Sorted unique non-zero values in u_input (the per-sample vocabulary).
+
+    Returns
+    -------
+    u_A : np.ndarray, shape (len(node), 2 * len(node))
+        Hybrid [M_h_in | M_h_out] adjacency block.
+    alias : list of int
+        Index of each u_input[i] within `node`.
+    """
+    n       = len(node)
+    seq_len = len(u_input)
+
+    node_to_idx = {v: i for i, v in enumerate(node)}
+
+    valid_len = seq_len
+    for k in range(1, seq_len):
+        if u_input[k] == 0:
+            valid_len = k
+            break
+
+    indices = np.array([node_to_idx[x] for x in u_input[:valid_len]])
+
+    # ---- Sequential connect matrix M_S (Eq. 5) ----------------------------
+    A_seq = np.zeros((n, n))
+    if valid_len > 1:
+        src, dst = indices[:-1], indices[1:]
+        coords = src * n + dst
+        A_seq = np.bincount(coords, minlength=n * n).reshape(n, n).astype(float)
+
+    col_sum = A_seq.sum(axis=0); col_sum[col_sum == 0] = 1
+    A_seq_in  = A_seq / col_sum
+    row_sum = A_seq.sum(axis=1); row_sum[row_sum == 0] = 1
+    A_seq_out = (A_seq.T / row_sum)
+
+    # ---- Full-connect matrix M_F (Eq. 6, 1/distance weighting) ------------
+    A_full = np.zeros((n, n))
+    if valid_len > 1:
+        ii, jj = np.triu_indices(valid_len, k=1)
+        u_batch = indices[ii]
+        v_batch = indices[jj]
+        weights = 1.0 / (jj - ii).astype(float)
+        coords  = u_batch * n + v_batch
+        A_full  = np.bincount(coords, weights=weights, minlength=n * n).reshape(n, n)
+
+    col_sum = A_full.sum(axis=0); col_sum[col_sum == 0] = 1
+    A_full_in  = A_full / col_sum
+    row_sum = A_full.sum(axis=1); row_sum[row_sum == 0] = 1
+    A_full_out = (A_full.T / row_sum)
+
+    # ---- Hybrid M_h: equal-weight sum then [in | out] concat ---------------
+    A_in  = 0.5 * A_seq_in  + 0.5 * A_full_in
+    A_out = 0.5 * A_seq_out + 0.5 * A_full_out
+    u_A   = np.concatenate([A_in, A_out]).T   # shape (n, 2n)
+
+    alias = [node_to_idx[x] for x in u_input]
+    return u_A, alias
+
+
 def build_graph(train_data):
     graph = nx.DiGraph()
     for seq in train_data:
@@ -74,131 +163,42 @@ class Data():
 
     def get_slice(self, i):
         inputs, mask, targets = self.inputs[i], self.mask[i], self.targets[i]
-        # print("INPUT[0]", inputs[0])
-        # Q: What is A? graph matrix
-        # Q: What is node? storing the delta info
         items, n_node, A, alias_inputs = [], [], [], []
         for u_input in inputs:
             n_node.append(len(np.unique(u_input)))
         max_n_node = np.max(n_node)
         for u_input in inputs:
             node = np.unique(u_input)
-            # print("NODE 0", node)
             items.append(node.tolist() + (max_n_node - len(node)) * [0])
-            u_A = np.zeros((max_n_node, max_n_node))
+            # Pad u_input to max_n_node so all samples have the same alias length
+            u_input_padded = np.concatenate(
+                [u_input, np.zeros(max_n_node - len(u_input), dtype=u_input.dtype)]
+            ) if len(u_input) < max_n_node else u_input
 
-            for i in np.arange(len(u_input) - 1):
-                if u_input[i + 1] == 0:
-                    break
-                u = np.where(node == u_input[i])[0][0]
-                for j in np.arange(1, len(node)-i-1):
-                    v = np.where(node == u_input[i + j])[0][0]
-                    u_A[u][v] = 1
-
-            for i in np.arange(len(u_input) - 1):
-                if u_input[i + 1] == 0:
-                    break
-                u = np.where(node == u_input[i])[0][0]
-                v = np.where(node == u_input[i + 1])[0][0]
-                u_A[u][v] += 1
-                    
-            u_sum_in = np.sum(u_A, 0)
-            u_sum_in[np.where(u_sum_in == 0)] = 1
-            u_A_in = np.divide(u_A, u_sum_in)
-            u_sum_out = np.sum(u_A, 1)
-            u_sum_out[np.where(u_sum_out == 0)] = 1
-            u_A_out = np.divide(u_A.transpose(), u_sum_out)
-            u_A = np.concatenate([u_A_in, u_A_out]).transpose()
-            A.append(u_A)
-            alias_inputs.append([np.where(node == i)[0][0] for i in u_input])
-            # print()
-            # print("ALIAS", alias_inputs)
-            # exit(0)
-
-        # print(alias_inputs[0])
-        # exit(0)
+            # Build hybrid adjacency using the shared corrected helper
+            u_A_raw, alias = _build_hybrid_A(u_input_padded, node)
+            # Pad adjacency to (max_n_node, 2*max_n_node) for batching
+            pad_rows = max_n_node - u_A_raw.shape[0]
+            pad_cols = 2 * max_n_node - u_A_raw.shape[1]
+            u_A_padded = np.pad(u_A_raw, ((0, pad_rows), (0, pad_cols)))
+            A.append(u_A_padded)
+            # Pad alias to max_n_node length
+            alias_padded = alias + [0] * (max_n_node - len(alias))
+            alias_inputs.append(alias_padded)
         return alias_inputs, A, items, mask, targets
 
     def get_one_slice(self, i):
-        historical_deltas = self.inputs[i][0] # getting test data in the row i
-        # print( " historical_deltas ", type(historical_deltas), len(historical_deltas), historical_deltas.tolist())
-        # print("INPUT[0]", inputs[0])
-        # Q: What is A? graph matrix
-        # Q: What is node? storing the delta info
-        A, alias_inputs = [], []
-        max_unique_count = len(np.unique(historical_deltas))
-        unique_deltas = np.unique(historical_deltas).tolist() 
-        
-        u_A = np.zeros((max_unique_count, max_unique_count))
-
-        for i in np.arange(len(historical_deltas) - 1):
-            if historical_deltas[i + 1] == 0:
-                break
-            u = np.where(unique_deltas == historical_deltas[i])[0][0]
-            for j in np.arange(1, len(unique_deltas)-i-1):
-                v = np.where(unique_deltas == historical_deltas[i + j])[0][0]
-                u_A[u][v] = 1
-
-        for i in np.arange(len(historical_deltas) - 1):
-            if historical_deltas[i + 1] == 0:
-                break
-            u = np.where(unique_deltas == historical_deltas[i])[0][0]
-            v = np.where(unique_deltas == historical_deltas[i + 1])[0][0]
-            u_A[u][v] += 1
-                
-        u_sum_in = np.sum(u_A, 0)
-        u_sum_in[np.where(u_sum_in == 0)] = 1
-        u_A_in = np.divide(u_A, u_sum_in)
-        u_sum_out = np.sum(u_A, 1)
-        u_sum_out[np.where(u_sum_out == 0)] = 1
-        u_A_out = np.divide(u_A.transpose(), u_sum_out)
-        u_A = np.concatenate([u_A_in, u_A_out]).transpose()
-        A.append(u_A)
-        alias_inputs.append([np.where(unique_deltas == i)[0][0] for i in historical_deltas])
-        # print(" historical_deltas ", len(historical_deltas), historical_deltas.tolist())
-        # print("unique_deltas ", len(unique_deltas), unique_deltas)
-        # print(" A ", len(A), np.array(A).shape)
-        # print(" alias_inputs ", np.array(alias_inputs).shape, alias_inputs)
-        # print(" A ", A)
-        # exit(0)
-        return alias_inputs, A, [unique_deltas]
+        historical_deltas = self.inputs[i][0]
+        node = np.unique(historical_deltas)
+        u_A, alias = _build_hybrid_A(historical_deltas, node)
+        return [alias], [u_A], [node.tolist()]
 
 def build_adjacency_matrix_and_alias(historical_deltas):
-    # print( " historical_deltas ", type(historical_deltas), len(historical_deltas), historical_deltas.tolist())
-    A, alias_inputs = [], []
-    max_unique_count = len(np.unique(historical_deltas))
-    if type(historical_deltas) == list:
+    if not isinstance(historical_deltas, np.ndarray):
         historical_deltas = np.array(historical_deltas)
-    unique_deltas = np.unique(historical_deltas).tolist() 
-    
-    u_A = np.zeros((max_unique_count, max_unique_count))
-
-    for i in np.arange(len(historical_deltas) - 1):
-        if historical_deltas[i + 1] == 0:
-            break
-        u = np.where(unique_deltas == historical_deltas[i])[0][0]
-        for j in np.arange(1, len(unique_deltas)-i-1):
-            v = np.where(unique_deltas == historical_deltas[i + j])[0][0]
-            u_A[u][v] = 1
-
-    for i in np.arange(len(historical_deltas) - 1):
-        if historical_deltas[i + 1] == 0:
-            break
-        u = np.where(unique_deltas == historical_deltas[i])[0][0]
-        v = np.where(unique_deltas == historical_deltas[i + 1])[0][0]
-        u_A[u][v] += 1
-            
-    u_sum_in = np.sum(u_A, 0)
-    u_sum_in[np.where(u_sum_in == 0)] = 1
-    u_A_in = np.divide(u_A, u_sum_in)
-    u_sum_out = np.sum(u_A, 1)
-    u_sum_out[np.where(u_sum_out == 0)] = 1
-    u_A_out = np.divide(u_A.transpose(), u_sum_out)
-    u_A = np.concatenate([u_A_in, u_A_out]).transpose()
-    A.append(u_A)
-    alias_inputs.append([np.where(unique_deltas == i)[0][0] for i in historical_deltas])
-
-    return alias_inputs, A, [unique_deltas]
+    node = np.unique(historical_deltas)
+    u_A, alias = _build_hybrid_A(historical_deltas, node)
+    return [alias], [u_A], [node.tolist()]
     
 
 def topn_test():
