@@ -47,8 +47,17 @@ SSD_MISS_LATENCY_S = 0.0001   # 0.1 ms per SSD miss
 HDD_MISS_LATENCY_S = 0.020    # 20 ms per HDD miss
 
 # Cache sizes evaluated per-epoch and in the final summary
-MULTI_CACHE_SIZES  = [10, 100, 1000]
+MULTI_CACHE_SIZES  = [1000]
 PRIMARY_CACHE_SIZE = 1000     # used for the detailed per-run summary
+
+# MSR-Cambridge traces used for the main_v1.tex comparison table.
+EXPERIMENT_TRACES = [
+    'datasets/MSR-Cambridge/mds_0.csv.gz',
+    'datasets/MSR-Cambridge/proj_0.csv.gz',
+    'datasets/MSR-Cambridge/src1_2.csv.gz',
+    'datasets/MSR-Cambridge/hm_1.csv.gz',
+    'datasets/MSR-Cambridge/prxy_0.csv.gz',
+]
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +570,10 @@ def graph_wrapper(raw_trace):
 
 
 if __name__ == '__main__':
-    arr_lba_to_prefetch, n_tests = graph_wrapper('dataset/MSR-Cambridge/src1_2.csv.gz')
-    print('Number of test IOs:', n_tests)
-    print('Sample prefetch addresses:', arr_lba_to_prefetch[:10])
+    for raw_trace in EXPERIMENT_TRACES:
+        print('\n' + '#' * 72)
+        print(f'Running SGDP experiment: trace={raw_trace}')
+        print('#' * 72)
+        arr_lba_to_prefetch, n_tests = graph_wrapper(raw_trace)
+        print('Number of test IOs:', n_tests)
+        print('Sample prefetch addresses:', arr_lba_to_prefetch[:10])

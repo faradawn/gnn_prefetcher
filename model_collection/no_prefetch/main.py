@@ -25,18 +25,30 @@ HDD_MISS_LATENCY_S = 0.020    # 20  ms per HDD miss
 # Trace loading
 # ---------------------------------------------------------------------------
 
+def expand_to_8kb_blocks(lba_arr, size_arr):
+    """Expand each I/O request into consecutive 8KB block accesses."""
+    n_blocks = np.maximum(1, np.ceil(np.nan_to_num(size_arr) / 8192).astype(np.int64))
+    cumsum   = np.concatenate([[0], np.cumsum(n_blocks[:-1])])
+    total    = int(n_blocks.sum())
+    row_idx  = np.repeat(np.arange(len(lba_arr)), n_blocks)
+    within   = np.arange(total) - np.repeat(cumsum, n_blocks)
+    return (lba_arr[row_idx] + within).tolist()
+
+
 def load_test_trace(dataset):
     df = pd.read_csv(dataset, engine='python', skiprows=0, header=None,
-                     na_values=['-1'], usecols=[0, 4],
-                     names=['TimeStamp', 'Offset'])
+                     na_values=['-1'], usecols=[0, 4, 5],
+                     names=['TimeStamp', 'KB_Offset', 'Size'])
+    df['KB_Offset'] = df['KB_Offset'] // 8192
     df = df.sort_values(by=['TimeStamp']).reset_index(drop=True)
-    
-    #df = df.head(600000)
-    
     print(f'\nReading trace: {dataset}')
     print(f'Rows in trace : {len(df)}')
 
-    lba_list = df['Offset'].values.tolist()
+    lba_list = expand_to_8kb_blocks(
+        df['KB_Offset'].values.astype(np.int64),
+        df['Size'].fillna(0).values,
+    )
+    print(f'Expanded to {len(lba_list)} 8KB block accesses')
 
     split_idx   = int(len(lba_list) * -VALID_PORTION)
     train_trace = lba_list[:split_idx]

@@ -90,7 +90,7 @@ SSD_MISS_LATENCY_S = 0.0001   # 0.1 ms
 HDD_MISS_LATENCY_S = 0.020    # 20  ms
 BLOCK_SIZE_KB      = 8        # normalized block size
 
-# Cache size evaluated per-epoch and in the final summary
+# Cache size evaluated per-epoch and in the final summary (main_v1.tex)
 MULTI_CACHE_SIZES = [1000]
 
 # MSR-Cambridge traces used for the final comparison table.

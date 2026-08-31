@@ -47,30 +47,46 @@ class DequeLRU():
         assert len(self.cache) <= self.maxsize
     # push the new, return the popped lba else None
 
-    # check if lba is in cache
-    def check(self, lba):
-        self.total_ios += 1
+    def push(self, lba, lbamark='n'):
+
+        if lbamark == 'n':
+            self.total_ios += 1
+        if self.maxsize == 0:
+            return None
+        popped = None
         if lba in self.cache:
-            self.total_prehits += 1
-            self.total_hits += 1
-            return True
-        else:
-            return False
-    
-    def push(self, lba, lbamark='p'):
-        self.total_pres += 1
-        if lba in self.cache:
+
             self._boost(lba)
+
+            if lbamark =='n':
+                self.total_hits += 1
+
+                if self.marks[lba] == 'p':
+                    self.total_prehits += 1
+                    self.marks[lba] = 'n'
+
+            return None
+
         else:
+            if lbamark == 'p':
+                self.total_pres += 1
             if self.full():
-                self.cache.pop()
+                popped = self.cache.pop()
+                poppedmark = self.marks.pop(popped)
+
             self.cache.appendleft(lba)
+            self.marks[lba] = lbamark
+
+            if popped:
+                return popped, poppedmark
+            else:
+                return None
 
     def get_hit_rate(self):
         return self.total_hits / (self.total_ios + 1e-16)
 
     def get_prehit_rate(self):
-        return self.total_prehits / (self.total_ios + 1e-16)
+        return self.total_prehits / (self.total_pres + 1e-16)
 
     def get_stats(self):
         return self.total_ios,self.total_pres,self.total_hits,self.total_prehits
@@ -101,9 +117,7 @@ class CacheTest():
                 return self.cache.push(lba=lba,lbamark='p')
         else:
             return self.cache.push(lba=lba,lbamark='p')
-    def check(self, lba):
-        return self.cache.check(lba)
-    
+
     def get_hit_rate(self):
         return  self.cache.get_hit_rate()
 
