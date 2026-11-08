@@ -35,6 +35,7 @@ class Options:
         self.dataset_percent = 1.0
         self.window          = 32
         self.topnum          = 1000
+        self.eval_batch_size = 512        # same evaluation batch size as GCN
 
 opt = Options()
 
@@ -459,6 +460,37 @@ def convert_hist_delta_to_classes(historical_deltas):
     return delta_classes
 
 
+def run_batched_inference(model, arr_delta_classes, batch_size=512):
+    """Batched evaluation, same graph construction, padding and scoring as the GCN baseline."""
+    model.eval()
+    feats = []
+    for delta_classes in arr_delta_classes:
+        [alias], [A], [items] = build_adjacency_matrix_and_alias(delta_classes)
+        feats.append((np.asarray(alias), np.asarray(items), np.asarray(A)))
+
+    preds = []
+    with torch.no_grad():
+        for start in range(0, len(feats), batch_size):
+            chunk = feats[start:start + batch_size]
+            B, seq_len = len(chunk), len(chunk[0][0])
+            max_n = max(len(it) for _, it, _ in chunk)
+            alias = np.zeros((B, seq_len), dtype=np.int64)
+            items = np.zeros((B, max_n), dtype=np.int64)
+            A     = np.zeros((B, max_n, 2 * max_n), dtype=np.float32)
+            for i, (al, it, a) in enumerate(chunk):
+                n = len(it)
+                alias[i], items[i, :n] = al, it
+                A[i, :n, :n] = a[:, :n]                    # in-block
+                A[i, :n, max_n:max_n + n] = a[:, n:]       # out-block
+            alias_t = trans_to_cuda(torch.from_numpy(alias))
+            hidden  = model(trans_to_cuda(torch.from_numpy(items)), trans_to_cuda(torch.from_numpy(A)))
+            bidx    = torch.arange(B, device=hidden.device).unsqueeze(1).expand(-1, seq_len)
+            mask    = trans_to_cuda(torch.ones((B, seq_len), dtype=torch.long))
+            scores  = model.compute_scores(hidden[bidx, alias_t], mask)
+            preds.extend(trans_to_cpu(scores.argmax(dim=1)).tolist())
+    return preds
+
+
 def predict_next_lba(last_lba, historical_deltas):
     delta_classes   = convert_hist_delta_to_classes(historical_deltas)
     predicted_class = run_single_inference(TRAINED_MODEL, delta_classes)
@@ -526,19 +558,15 @@ def graph_wrapper(raw_trace):
         torch.save(model, os.path.join(model_path, f'{epoch}.pt'))
 
     # -----------------------------------------------------------------------
-    # Final per-inference evaluation with timing (user's addition)
+    # Final batched evaluation with timing (same evaluation batch size as GCN)
     # -----------------------------------------------------------------------
     model.eval()
-    print('\nDo per inference testing:')
+    print('\nDo batched inference testing:')
 
     print(f'     len test_windows {len(test_lbas)}  /  full test_trace {len(test_trace)}')
-    
-    arr_raw_pred = []
+
     start_eval = time.time()
-    with torch.no_grad():
-        for delta_classes in test_inputs:
-            predicted_class = run_single_inference(model, delta_classes)
-            arr_raw_pred.append(predicted_class)
+    arr_raw_pred = run_batched_inference(model, test_inputs, batch_size=opt.eval_batch_size)
     inference_time = time.time() - start_eval
 
     metrics, arr_lba_to_prefetch = single_cache_test(

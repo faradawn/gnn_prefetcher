@@ -177,10 +177,11 @@ class Data():
 
             # Build hybrid adjacency using the shared corrected helper
             u_A_raw, alias = _build_hybrid_A(u_input_padded, node)
-            # Pad adjacency to (max_n_node, 2*max_n_node) for batching
-            pad_rows = max_n_node - u_A_raw.shape[0]
-            pad_cols = 2 * max_n_node - u_A_raw.shape[1]
-            u_A_padded = np.pad(u_A_raw, ((0, pad_rows), (0, pad_cols)))
+            # Pad in- and out-blocks separately to (max_n_node, 2*max_n_node) for batching
+            n = u_A_raw.shape[0]
+            u_A_padded = np.zeros((max_n_node, 2 * max_n_node))
+            u_A_padded[:n, :n] = u_A_raw[:, :n]
+            u_A_padded[:n, max_n_node:max_n_node + n] = u_A_raw[:, n:]
             A.append(u_A_padded)
             # Pad alias to max_n_node length
             alias_padded = alias + [0] * (max_n_node - len(alias))
