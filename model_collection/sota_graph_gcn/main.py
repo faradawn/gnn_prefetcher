@@ -61,8 +61,8 @@ except ImportError:
 class Options:
     def __init__(self):
         self.batchSize       = 128
-        self.hiddenSize      = 16
-        self.numLayers       = 3
+        self.hiddenSize      = 64
+        self.numLayers       = 2
         self.epoch           = 10
         self.lr              = 0.001
         self.lr_dc           = 0.1
@@ -541,8 +541,8 @@ def spectral_wrapper(raw_trace):
         single_cache_test_multi(test_trace, epoch_pred, test_wpos, dicts,
                                 save_name=f'{safe_trace}_{config_tag}_epoch{epoch}')
         torch.save(model, os.path.join(model_path, f'{epoch}.pt'))
+        model.scheduler.step()
 
-    model.scheduler.step()
     model.eval()
 
     # ---- Final inference ----
